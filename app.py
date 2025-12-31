@@ -1,106 +1,98 @@
-
 import streamlit as st
 import pandas as pd
 import psycopg2
 from datetime import date
 
-# ================= CONFIGURAÇÕES =================
-st.set_page_config(page_title="Organizador Financeiro", layout="wide")
-st.title("💰 Organizador Financeiro Mensal")
+# ================= CONFIG =======================
+st.set_page_config(page_title="Controle Financeiro", page_icon="💸", layout="wide")
+st.title("💸 Controle Financeiro")
 
 # ================= BANCO DE DADOS =================
-DATABASE_URL = st.secrets["DATABASE_URL"]
 
-conn = psycopg2.connect(DATABASE_URL)
-cursor = conn.cursor()
+# Pega do secrets da hospedagem (Streamlit Cloud)
+DATABASE_URL = st.secrets.get("DATABASE_URL")
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS lancamentos (
-    id SERIAL PRIMARY KEY,
-    data TEXT,
-    tipo TEXT,
-    referente TEXT,
-    valor REAL,
-    mes TEXT
-)
-""")
-conn.commit()
+if not DATABASE_URL:
+    st.error("❌ DATABASE_URL não encontrado! Confira os Secrets no Streamlit Cloud.")
+    st.stop()
 
-# ================= FUNÇÕES =================
-def inserir(data, tipo, referente, valor, mes):
+try:
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS lancamentos (
+        id SERIAL PRIMARY KEY,
+        data DATE NOT NULL,
+        tipo TEXT NOT NULL,
+        referente TEXT NOT NULL,
+        valor NUMERIC(10,2) NOT NULL,
+        mes TEXT NOT NULL
+    )
+    """)
+    conn.commit()
+
+except Exception as e:
+    st.error(f"❌ Erro ao conectar no banco: {e}")
+    st.stop()
+
+
+# ================= FUNÇÕES =======================
+def salvar_lancamento(data, tipo, referente, valor, mes):
     cursor.execute(
         "INSERT INTO lancamentos (data, tipo, referente, valor, mes) VALUES (%s, %s, %s, %s, %s)",
         (data, tipo, referente, valor, mes)
     )
     conn.commit()
 
-def carregar_mes(mes):
-    df = pd.read_sql("SELECT * FROM lancamentos WHERE mes=%s ORDER BY id DESC", conn, params=(mes,))
-    return df
 
-def saldo_mes_anterior(mes_atual):
-    ano, mes = map(int, mes_atual.split("-"))
-    if mes == 1:
-        ano -= 1
-        mes = 12
-    else:
-        mes -= 1
-    mes_ant = f"{ano}-{mes:02d}"
+def listar_lancamentos():
+    cursor.execute("SELECT * FROM lancamentos ORDER BY data DESC, id DESC")
+    registros = cursor.fetchall()
+    colunas = ["ID", "Data", "Tipo", "Referente", "Valor", "Mês"]
+    return pd.DataFrame(registros, columns=colunas)
 
-    df = pd.read_sql("SELECT tipo, valor FROM lancamentos WHERE mes=%s", conn, params=(mes_ant,))
-    entradas = df[df["tipo"] == "Entrada"]["valor"].sum() if not df.empty else 0
-    saidas = df[df["tipo"] == "Saída"]["valor"].sum() if not df.empty else 0
-    return entradas - saidas
 
-def remover(ids):
-    for i in ids:
-        cursor.execute("DELETE FROM lancamentos WHERE id=%s", (i,))
-    conn.commit()
+# ================= INTERFACE ======================
 
-# ================= INTERFACE =================
-mes_selecionado = st.selectbox(
-    "Selecione o mês",
-    [f"{date.today().year}-{m:02d}" for m in range(1, 13)],
-    index=date.today().month - 1
+st.subheader("📌 Novo Lançamento")
+
+col1, col2, col3 = st.columns(3)
+data = col1.date_input("Data", value=date.today())
+tipo = col2.selectbox("Tipo", ["Entrada", "Saída"])
+referente = col3.text_input("Referente")
+
+col4, col5 = st.columns(2)
+valor = col4.number_input("Valor (R$)", min_value=0.0, format="%.2f")
+mes = col5.selectbox("Mês", 
+    ["Janeiro","Fevereiro","Março","Abril","Maio","Junho",
+     "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"]
 )
 
-saldo_ant = saldo_mes_anterior(mes_selecionado)
-st.info(f"💼 Saldo do mês anterior: R$ {saldo_ant:,.2f}")
+if st.button("💾 Salvar Lançamento"):
+    if referente and valor > 0:
+        salvar_lancamento(data, tipo, referente, valor, mes)
+        st.success("✔️ Lançamento registrado!")
+    else:
+        st.warning("⚠️ Preencha todos os campos!")
 
-with st.form("form"):
-    col1, col2, col3 = st.columns(3)
-    data = col1.date_input("Data", date.today())
-    tipo = col2.selectbox("Tipo", ["Entrada", "Saída"])
-    referente = col3.text_input("Referente a")
-    valor = st.number_input("Valor", min_value=0.0, format="%.2f")
+st.divider()
 
-    salvar = st.form_submit_button("Salvar")
+# ================= LISTAGEM =======================
+st.subheader("📋 Lançamentos Registrados")
 
-    if salvar and referente and valor > 0:
-        inserir(str(data), tipo, referente, valor, mes_selecionado)
-        st.success("Lançamento adicionado com sucesso!")
-        st.experimental_rerun()
+df = listar_lancamentos()
+st.dataframe(df, use_container_width=True)
 
-df = carregar_mes(mes_selecionado)
-
+# ================= TOTALIZAÇÃO ====================
 if not df.empty:
-    entradas = df[df["tipo"] == "Entrada"]["valor"].sum()
-    saidas = df[df["tipo"] == "Saída"]["valor"].sum()
-    saldo = saldo_ant + entradas - saidas
+    total_entradas = df[df["Tipo"] == "Entrada"]["Valor"].sum()
+    total_saidas = df[df["Tipo"] == "Saída"]["Valor"].sum()
+    saldo = total_entradas - total_saidas
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Entradas", f"R$ {entradas:,.2f}")
-    c2.metric("Saídas", f"R$ {saidas:,.2f}")
-    c3.metric("Saldo Final", f"R$ {saldo:,.2f}")
-
-    st.subheader("📋 Lançamentos")
-    df["Selecionar"] = False
-    editado = st.data_editor(df, hide_index=True)
-
-    if st.button("🗑️ Remover selecionados"):
-        ids = editado[editado["Selecionar"] == True]["id"].tolist()
-        remover(ids)
-        st.experimental_rerun()
-
+    st.metric("Total Entradas 💰", f"R$ {total_entradas:.2f}")
+    st.metric("Total Saídas 🧾", f"R$ {total_saidas:.2f}")
+    st.metric("Saldo Final 🏦", f"R$ {saldo:.2f}")
 else:
-    st.warning("Nenhum lançamento neste mês.")
+    st.info("Nenhum lançamento registrado ainda.")
+
